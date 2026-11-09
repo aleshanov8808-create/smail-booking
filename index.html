@@ -369,6 +369,36 @@ const BUSY = new Set();
     }
   }
 })();
+/* живые занятые даты из общей базы (та же, что у сайта и календаря хозяйки).
+   Если база недоступна — остаются даты из ссылки бота (?b=). */
+const DB_URL = "https://hxfvxqrgicqmvwrgezlz.supabase.co";
+const DB_KEY = "sb_publishable_otKtMG6FxeE0isqnuKEEOg_RE8LrOX1"; // публичный ключ, как на сайте: доступны только функции busy_ranges/create_request
+function fetchBusy(){
+  const ctl = window.AbortController ? new AbortController() : null;
+  const timer = setTimeout(() => ctl && ctl.abort(), 6000);
+  return fetch(DB_URL + "/rest/v1/rpc/busy_ranges", {
+    method:"POST",
+    headers:{ "apikey":DB_KEY, "Authorization":"Bearer " + DB_KEY, "Content-Type":"application/json" },
+    body:JSON.stringify({ p_resource:HOUSE.id }),
+    signal: ctl ? ctl.signal : undefined
+  }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(rows => {
+      BUSY.clear();
+      for (const row of rows || []) {
+        let d = String(row.check_in).slice(0,10); const end = String(row.check_out).slice(0,10);
+        for (let i = 0; d < end && i < 400; i++) { BUSY.add(d); d = addDays(d, 1); }
+      }
+      return true;
+    })
+    .finally(() => clearTimeout(timer));
+}
+function loadBusy(){
+  return fetchBusy().then(() => {
+    // выбранные даты успели занять — сбрасываем выбор
+    if (S.ci && (!validCheckin(S.ci) || (S.co && !rangeFree(S.ci, S.co)))) { S.ci = null; S.co = null; if (S.view === "form") show("book"); }
+    if (S.ym) renderCal(); else updateBar();
+  }).catch(() => {});
+}
 const free = d => !BUSY.has(d);
 const rangeFree = (ci, co) => { for (let d = ci; d < co; d = addDays(d,1)) if (!free(d)) return false; return true; };
 const validCheckout = (ci, d) => { const n = diffDays(ci, d); return n >= HOUSE.minNights && n <= HOUSE.maxNights && rangeFree(ci, d); };
@@ -491,6 +521,21 @@ function submit(){
   $("#e-phone").textContent = PHONE_RE.test(phone) ? "" : "Проверьте номер, например +7 900 123-45-67";
   if (name.length < 2 || !PHONE_RE.test(phone)) return;
   if (!$("#f-ok").checked) { $("#e-phone").textContent = "Отметьте согласие на обработку данных"; return; }
+  if (sending) return;
+  sending = true; $("#bar-btn").disabled = true;
+  // перед отправкой ещё раз сверяемся с базой: даты могли занять через сайт или календарь
+  fetchBusy().catch(() => false).then(() => {
+    sending = false;
+    if (!rangeFree(S.ci, S.co)) {
+      S.ci = null; S.co = null; renderCal(); show("book");
+      $("#cal-msg").textContent = "Эти даты только что заняли. Выберите, пожалуйста, другие.";
+      return;
+    }
+    send(name, phone);
+  });
+}
+let sending = false;
+function send(name, phone){
   const payload = { v:1, h:HOUSE.id, ci:S.ci, n:nights(), g:S.guests, bath:S.bath, pet:S.pet ? 1 : 0, name, phone };
   if (inTelegram) {
     try { tg.sendData(JSON.stringify(payload)); return; }
@@ -499,6 +544,10 @@ function submit(){
   show("done");
 }
 $("#bar-btn").onclick = () => { if (S.view === "book") openForm(); else if (S.view === "form") submit(); };
+
+loadBusy();
+document.addEventListener("visibilitychange", () => { if (!document.hidden) loadBusy(); });
+setInterval(() => { if (!document.hidden) loadBusy(); }, 60000);
 
 if (tg) { tg.ready(); tg.expand(); try { tg.setHeaderColor("#110D0A"); tg.setBackgroundColor("#110D0A"); } catch (e) {} }
 </script>
